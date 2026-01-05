@@ -12,10 +12,12 @@ from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="Price Tracking", layout="wide")
 
+
 try:
     API_KEY = st.secrets["RAINFOREST_API_KEY"]
 except Exception:
     API_KEY = os.environ.get("RAINFOREST_API_KEY")
+MARKETPLACE = "amazon.co.uk"
 
 
 
