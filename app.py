@@ -17,19 +17,7 @@ try:
 except Exception:
     API_KEY = os.environ.get("RAINFOREST_API_KEY")
 
-try:
-    APP_PASSWORD = st.secrets.get("APP_PASSWORD")
-except Exception:
-    APP_PASSWORD = None
 
-MARKETPLACE = os.environ.get("AMAZON_DOMAIN", "amazon.co.uk")
-
-if APP_PASSWORD:
-    pw = st.text_input("Password", type="password")
-    if pw != APP_PASSWORD:
-        st.stop()
-
-# =========================================================
 
 st.title("Price Tracking")
 st.write("Click **Fetch Prices** to pull current price from Amazon (Rainforest API).")
