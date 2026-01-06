@@ -47,6 +47,40 @@ def _to_float(x):
                     return f
     return None
 
+def _to_money_float(x):
+    """
+    Only parse money-like values (prefers £-prefixed numbers).
+    Prevents parsing percentages like '20%' as 20.
+    """
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    if isinstance(x, str):
+        s = x.strip()
+
+        # Prefer explicit GBP like "£59.99"
+        m = re.search(r"£\s*(\d+(?:[.,]\d+)?)", s)
+        if m:
+            return float(m.group(1).replace(",", "."))
+
+        # If string contains currency words/symbols, allow generic number parse
+        if any(tok in s.lower() for tok in ["gbp", "£", "pound", "pounds"]):
+            m2 = re.search(r"(\d+(?:[.,]\d+)?)", s)
+            if m2:
+                return float(m2.group(1).replace(",", "."))
+
+        # Otherwise: do NOT parse (avoids '20%' -> 20)
+        return None
+
+    if isinstance(x, dict):
+        for k in ["value", "amount", "raw", "price", "final_price"]:
+            if k in x:
+                f = _to_money_float(x.get(k))
+                if f is not None:
+                    return f
+    return None
+
 
 def _fmt_num(x: float):
     if x is None:
@@ -258,8 +292,8 @@ def extract_base_price(product: dict):
 
 def extract_voucher_price(product: dict, base_price: float | None):
     """
-    Voucher price (e.g. 'Voucher price £59.99') deep scan.
-    Returns a float or None.
+    Extracts voucher/coupon APPLIED price (e.g. 'Voucher price £59.99').
+    Critical: ignores percentages like '20%'.
     """
     if not isinstance(product, dict):
         return None
@@ -267,47 +301,35 @@ def extract_voucher_price(product: dict, base_price: float | None):
     candidates = []
 
     def add(score, value):
-        f = _to_float(value)
+        f = _to_money_float(value)  # IMPORTANT: money-only parsing
         if f is not None and f > 0:
             candidates.append((score, f))
 
-    # try to parse voucher price from any string
     def parse_from_string(s: str):
         if not s:
             return
         t = s.lower()
 
-        # strongest: explicit phrase
+        # strongest phrase
         if "voucher price" in t:
             add(250, s)
             return
 
-        # other common patterns
+        # other coupon/voucher hints
         if "voucher" in t or "coupon" in t:
-            # pick the first currency number after voucher/coupon texts
-            m = re.search(r"(£\s*\d+[.,]?\d*|\d+[.,]\d+|\d+)", s)
-            if m:
-                add(120, m.group(1))
+            # only accept if string actually contains £
+            if "£" in s:
+                add(180, s)
 
     def walk(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
                 key = str(k).lower()
 
-                # 1) direct key matches that often hold the voucher-applied price
-                if key in [
-                    "voucher_price", "coupon_price",
-                    "price_after_coupon", "price_after_voucher",
-                    "checkout_price", "price_with_coupon", "price_with_voucher",
-                    "discounted_price", "final_price_after_coupon"
-                ]:
+                # direct voucher/coupon price keys
+                if (("voucher" in key or "coupon" in key) and "price" in key) or ("voucher price" in key):
                     add(220, v)
 
-                # 2) any key that contains voucher/coupon AND price
-                if (("voucher" in key or "coupon" in key) and "price" in key):
-                    add(210, v)
-
-                # 3) strings
                 if isinstance(v, str):
                     parse_from_string(v)
 
@@ -325,7 +347,7 @@ def extract_voucher_price(product: dict, base_price: float | None):
     if not candidates:
         return None
 
-    # prefer a voucher price that is <= base price (if base known)
+    # Prefer <= base price if known
     candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
     if base_price is not None and base_price > 0:
