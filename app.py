@@ -11,7 +11,7 @@ st.set_page_config(page_title="Price Tracking", layout="wide")
 
 # ---- CONFIG ----
 API_KEY = st.secrets.get("RAINFOREST_API_KEY") or os.environ.get("RAINFOREST_API_KEY")
-MARKETPLACE = "amazon_uk"  # UK
+MARKETPLACE = "amazon.co.uk"  
 
 # Optional simple password protection (same as your reference app)
 APP_PASSWORD = st.secrets.get("APP_PASSWORD")  # optional
@@ -160,18 +160,22 @@ if st.button("Fetch Prices"):
                 try:
                     r = requests.get(url, params=params, timeout=30)
                     data = r.json()
-
-                    st.write("HTTP status:", r.status_code)
-                    st.write("Top-level keys:", list(data.keys())[:20])
-                    st.json(data.get("request_info", {}))
-
-
-                    # credits (COPY)
-                    info = data.get("request_info", {})
+                    
+                    info = data.get("request_info", {}) or {}
+                    
                     credits_used = info.get("credits_used", credits_used)
                     credits_remaining = info.get("credits_remaining", credits_remaining)
+                    
+                    st.write("HTTP status:", r.status_code)
+                    st.write("request_info:", {k: info.get(k) for k in ["success", "status_code", "message", "credits_used", "credits_remaining"]})
+                    if "error" in data:
+                         st.write("top_level_error:", data.get("error"))
+                    
+                    product = data.get("product")
+                    if not isinstance(product, dict) or not product:
+                         row["Error"] = info.get("message") or data.get("error") or "No product returned"
+                         product = {}
 
-                    product = data.get("product", {})
 
                     # mapping override (COPY)
                     map_entry = mapping_dict.get(asin_norm)
