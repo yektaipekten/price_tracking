@@ -35,9 +35,11 @@ def _parse_number_from_string(s: str):
     except:
         return None
 
+
 def extract_brand(product: dict):
     if not isinstance(product, dict):
         return None
+
     b = product.get("brand")
     if isinstance(b, str) and b.strip():
         return b.strip()
@@ -54,6 +56,7 @@ def extract_brand(product: dict):
                 if v:
                     return v
     return None
+
 
 def extract_price(product: dict):
     """
@@ -133,19 +136,24 @@ def extract_price(product: dict):
 
     return None
 
-def extract_size(product: dict):
+
+def extract_size_thickness_weight(product: dict):
     """
-    Size might appear in:
-    - product.variants (selected variant)
-    - product.specifications (name contains size/dimensions)
-    - product.title (last resort)
-    Returns string or None.
+    Returns:
+      size: "122x170cm"
+      thickness: "0.5 cm"
+      weight: "2.07 kg"
+    Logic:
+      - size: first 2 dimensions (cm), ignores thickness
+      - thickness: a third dimension in cm (if present)
+      - weight: first 'kg' occurrence
     """
     if not isinstance(product, dict):
-        return None
+        return None, None, None
 
-    # 1) specifications
     specs = product.get("specifications", [])
+    raw_candidates = []
+
     if isinstance(specs, list):
         for sp in specs:
             if not isinstance(sp, dict):
@@ -154,33 +162,112 @@ def extract_size(product: dict):
             val = sp.get("value")
             if val is None:
                 continue
+            # En olası alanlar
             if any(k in name for k in ["size", "dimensions", "dimension", "rug size", "item dimensions"]):
-                v = str(val).strip()
-                if v:
-                    return v
+                raw_candidates.append(str(val))
 
-    # 2) variants (some payloads include selected variant)
+    # variants / attributes fallback
     variants = product.get("variants")
     if isinstance(variants, dict):
-        # common pattern: variants["selected"] contains size-like fields
         selected = variants.get("selected")
         if isinstance(selected, dict):
             for key in ["size", "dimensions", "value", "name"]:
-                if key in selected and selected.get(key):
-                    v = str(selected.get(key)).strip()
-                    if v:
-                        return v
+                if selected.get(key):
+                    raw_candidates.append(str(selected.get(key)))
 
-    # 3) occasionally attributes
     attrs = product.get("attributes")
     if isinstance(attrs, dict):
         for key in ["size", "dimensions"]:
-            if key in attrs and attrs.get(key):
-                v = str(attrs.get(key)).strip()
-                if v:
-                    return v
+            if attrs.get(key):
+                raw_candidates.append(str(attrs.get(key)))
 
-    return None
+    if not raw_candidates:
+        return None, None, None
+
+    raw = " | ".join([c for c in raw_candidates if c and c.strip()]).strip()
+    s = raw.lower().replace("×", "x")
+
+    # weight: "2.07 kg"
+    weight = None
+    m_weight = re.search(r"(\d+(?:[.,]\d+)?)\s*kg", s)
+    if m_weight:
+        weight = m_weight.group(1).replace(",", ".") + " kg"
+
+    # normalize for dimension parsing
+    dim = s.replace(" ", "")
+    # remove everything after ';' (often weight etc.)
+    dim = dim.split(";")[0]
+
+    # match 2 or 3 dims with optional unit (cm/mm/m)
+    # examples:
+    # 170x122x0.5cm
+    # 170x122x0.5 cm
+    # 170x122 cm
+    m = re.search(
+        r"(\d{2,4}(?:[.,]\d+)?)x(\d{2,4}(?:[.,]\d+)?)(?:x(\d{1,4}(?:[.,]\d+)?))?(cm|mm|m)?",
+        dim,
+    )
+    if not m:
+        # fallback: return raw as size
+        return raw, None, weight
+
+    a = m.group(1).replace(",", ".")
+    b = m.group(2).replace(",", ".")
+    c = m.group(3).replace(",", ".") if m.group(3) else None
+    unit = m.group(4) if m.group(4) else None
+
+    if not unit:
+        unit = "cm"
+
+    def to_float(x):
+        try:
+            return float(x)
+        except:
+            return None
+
+    af = to_float(a)
+    bf = to_float(b)
+    cf = to_float(c) if c else None
+
+    # unit -> cm
+    if unit == "m":
+        if af is not None:
+            af *= 100
+        if bf is not None:
+            bf *= 100
+        if cf is not None:
+            cf *= 100
+        unit = "cm"
+    elif unit == "mm":
+        if af is not None:
+            af /= 10
+        if bf is not None:
+            bf /= 10
+        if cf is not None:
+            cf /= 10
+        unit = "cm"
+
+    def fmt(x):
+        if x is None:
+            return None
+        if abs(x - int(x)) < 1e-9:
+            return str(int(x))
+        return str(x).rstrip("0").rstrip(".")
+
+    # size: enforce small x big
+    if af is not None and bf is not None:
+        x1 = min(af, bf)
+        x2 = max(af, bf)
+        size = f"{fmt(x1)}x{fmt(x2)}cm"
+    else:
+        size = f"{m.group(1)}x{m.group(2)}{unit}"
+
+    thickness = None
+    if cf is not None:
+        thickness = f"{fmt(cf)} cm"
+
+    return size, thickness, weight
+
 
 # ---- Main ----
 if st.button("Fetch Prices"):
@@ -204,6 +291,8 @@ if st.button("Fetch Prices"):
                 "Brand": None,
                 "ASIN": asin,
                 "Size": None,
+                "Thickness": None,
+                "Weight": None,
                 "Price": None,
                 "Date (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             }
@@ -226,16 +315,15 @@ if st.button("Fetch Prices"):
                 credits_remaining = info.get("credits_remaining", credits_remaining)
 
                 product = data.get("product")
-                if not isinstance(product, dict) or not product:
-                    # başarısızsa boş bırak
-                    pass
-                else:
+                if isinstance(product, dict) and product:
                     row["Brand"] = extract_brand(product)
-                    row["Size"] = extract_size(product)
+                    size, thickness, weight = extract_size_thickness_weight(product)
+                    row["Size"] = size
+                    row["Thickness"] = thickness
+                    row["Weight"] = weight
                     row["Price"] = extract_price(product)
 
             except Exception:
-                # hata olursa bile uygulama çökmeyecek; satır boş kalır
                 pass
 
             results.append(row)
@@ -244,6 +332,9 @@ if st.button("Fetch Prices"):
         time.sleep(0.25)
 
     df = pd.DataFrame(results)
+
+    # Column order exactly as requested
+    df = df[["Brand", "ASIN", "Size", "Thickness", "Weight", "Price", "Date (UTC)"]]
 
     st.subheader("Results")
     st.dataframe(df, use_container_width=True)
