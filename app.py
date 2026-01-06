@@ -11,9 +11,8 @@ import streamlit as st
 
 st.set_page_config(page_title="Price Tracking", layout="wide")
 
-# ---- CONFIG ----
 API_KEY = st.secrets.get("RAINFOREST_API_KEY") or os.environ.get("RAINFOREST_API_KEY")
-MARKETPLACE = "amazon.co.uk"  # UK domain
+MARKETPLACE = "amazon.co.uk"
 
 st.title("Price Tracking")
 st.write("Click **Fetch Prices** to pull current product data from Amazon (Rainforest API).")
@@ -23,15 +22,14 @@ ASINS = [a.strip().upper() for a in asins_text.splitlines() if a.strip()]
 
 
 # ----------------- Helpers -----------------
-def _to_float(x):
-    """Best-effort parse numeric price from int/float/str/dict."""
+def to_float(x):
+    """Parse first number from int/float/str/dict."""
     if x is None:
         return None
     if isinstance(x, (int, float)):
         return float(x)
     if isinstance(x, str):
-        s = x.strip()
-        m = re.search(r"(\d+[.,]\d+|\d+)", s)
+        m = re.search(r"(\d+[.,]\d+|\d+)", x)
         if not m:
             return None
         try:
@@ -39,116 +37,25 @@ def _to_float(x):
         except Exception:
             return None
     if isinstance(x, dict):
-        # IMPORTANT: Do NOT include voucher/coupon keys here.
         for k in ["value", "amount", "raw", "price", "final_price"]:
             if k in x:
-                f = _to_float(x.get(k))
-                if f is not None:
-                    return f
-    return None
-
-def _to_money_float(x):
-    """
-    Only parse money-like values (prefers £-prefixed numbers).
-    Prevents parsing percentages like '20%' as 20.
-    """
-    if x is None:
-        return None
-    if isinstance(x, (int, float)):
-        return float(x)
-    if isinstance(x, str):
-        s = x.strip()
-
-        # Prefer explicit GBP like "£59.99"
-        m = re.search(r"£\s*(\d+(?:[.,]\d+)?)", s)
-        if m:
-            return float(m.group(1).replace(",", "."))
-
-        # If string contains currency words/symbols, allow generic number parse
-        if any(tok in s.lower() for tok in ["gbp", "£", "pound", "pounds"]):
-            m2 = re.search(r"(\d+(?:[.,]\d+)?)", s)
-            if m2:
-                return float(m2.group(1).replace(",", "."))
-
-        # Otherwise: do NOT parse (avoids '20%' -> 20)
-        return None
-
-    if isinstance(x, dict):
-        for k in ["value", "amount", "raw", "price", "final_price"]:
-            if k in x:
-                f = _to_money_float(x.get(k))
+                f = to_float(x.get(k))
                 if f is not None:
                     return f
     return None
 
 
-def _fmt_num(x: float):
-    if x is None:
+def parse_gbp_from_text(s: str):
+    """Only parses GBP values like '£59.99' from text. Returns float or None."""
+    if not isinstance(s, str):
         return None
-    if abs(x - int(x)) < 1e-9:
-        return str(int(x))
-    return str(x).rstrip("0").rstrip(".")
-
-
-def _normalize_to_cm(num: float, unit: str) -> float:
-    unit = (unit or "").lower()
-    if unit in ["m", "metre", "metres"]:
-        return num * 100.0
-    if unit == "mm":
-        return num / 10.0
-    return num
-
-
-def _clean_x(s: str) -> str:
-    return (s or "").replace("×", "x").replace("*", "x")
-
-
-def _is_packaging_label(name: str) -> bool:
-    n = (name or "").strip().lower()
-    return any(k in n for k in ["package", "packaging", "parcel", "box"])
-
-
-def _parse_size_text_to_cm_pair(text: str):
-    """
-    Parses size from free text:
-      - "122 x 170 cm (Rectangular)"
-      - "160*230CM"
-      - "2.3 x 1.6 m"
-    Returns (a_cm, b_cm) or None.
-    """
-    if not text or not isinstance(text, str):
+    m = re.search(r"£\s*(\d+(?:[.,]\d+)?)", s)
+    if not m:
         return None
-
-    s = _clean_x(text).lower()
-    s = s.split(";")[0]
-    s = re.sub(r"\(.*?\)", "", s)  # remove parentheses
-    s = re.sub(r"\s+", " ", s).strip()
-
-    m = re.search(r"(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*(cm|mm|m|metre|metres)\b", s)
-    if m:
-        a = float(m.group(1).replace(",", "."))
-        b = float(m.group(2).replace(",", "."))
-        unit = m.group(3)
-        return (_normalize_to_cm(a, unit), _normalize_to_cm(b, unit))
-
-    s2 = s.replace(" ", "")
-    m2 = re.search(r"(\d{2,4}(?:[.,]\d+)?)x(\d{2,4}(?:[.,]\d+)?)\s*(cm|mm|m)\b", s2)
-    if m2:
-        a = float(m2.group(1).replace(",", "."))
-        b = float(m2.group(2).replace(",", "."))
-        unit = m2.group(3)
-        return (_normalize_to_cm(a, unit), _normalize_to_cm(b, unit))
-
-    return None
-
-
-def _format_size(a_cm: float, b_cm: float) -> str:
-    return f"{_fmt_num(a_cm)}x{_fmt_num(b_cm)}cm"
+    return float(m.group(1).replace(",", "."))
 
 
 def extract_brand(product: dict):
-    if not isinstance(product, dict):
-        return None
     b = product.get("brand")
     if isinstance(b, str) and b.strip():
         return b.strip()
@@ -156,208 +63,134 @@ def extract_brand(product: dict):
     specs = product.get("specifications", [])
     if isinstance(specs, list):
         for sp in specs:
-            if not isinstance(sp, dict):
-                continue
-            name = (sp.get("name") or "").strip().lower()
-            val = sp.get("value")
-            if name == "brand" and val:
-                v = str(val).strip()
+            if isinstance(sp, dict) and (sp.get("name") or "").strip().lower() == "brand":
+                v = sp.get("value")
                 if v:
-                    return v
+                    return str(v).strip()
     return None
 
 
 def extract_size(product: dict):
-    """
-    Size from:
-      - Product details -> Measurements -> Size
-      - OR from title
-    Returns "122x170cm" or None
-    """
-    if not isinstance(product, dict):
-        return None
+    """Size from Measurements->Size or title. Returns like 122x170cm."""
+    def parse_size(text: str):
+        if not isinstance(text, str):
+            return None
+        s = text.lower().replace("×", "x").replace("*", "x")
+        s = re.sub(r"\(.*?\)", "", s)
+        s = re.sub(r"\s+", " ", s).strip()
+
+        m = re.search(r"(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*(cm|mm|m|metre|metres)\b", s)
+        if not m:
+            s2 = s.replace(" ", "")
+            m = re.search(r"(\d{2,4}(?:[.,]\d+)?)x(\d{2,4}(?:[.,]\d+)?)\s*(cm|mm|m)\b", s2)
+        if not m:
+            return None
+
+        a = float(m.group(1).replace(",", "."))
+        b = float(m.group(2).replace(",", "."))
+        unit = m.group(3)
+
+        if unit in ["m", "metre", "metres"]:
+            a *= 100
+            b *= 100
+        elif unit == "mm":
+            a /= 10
+            b /= 10
+
+        def fmt(x):
+            if abs(x - int(x)) < 1e-9:
+                return str(int(x))
+            return str(x).rstrip("0").rstrip(".")
+
+        return f"{fmt(a)}x{fmt(b)}cm"
 
     specs = product.get("specifications", [])
     if isinstance(specs, list):
-        # A) grouped as Measurements
+        # Prefer Measurements -> Size
         for sp in specs:
             if not isinstance(sp, dict):
                 continue
             group = (sp.get("group_name") or sp.get("group") or sp.get("section") or sp.get("category") or "")
-            group_l = str(group).strip().lower()
-            name = (sp.get("name") or "").strip()
-            val = sp.get("value")
-            if val is None:
-                continue
-            if _is_packaging_label(name) or _is_packaging_label(group_l):
-                continue
-            if group_l == "measurements" and name.strip().lower() == "size":
-                parsed = _parse_size_text_to_cm_pair(str(val))
-                if parsed:
-                    return _format_size(parsed[0], parsed[1])
+            if str(group).strip().lower() == "measurements" and str(sp.get("name") or "").strip().lower() == "size":
+                val = sp.get("value")
+                out = parse_size(str(val))
+                if out:
+                    return out
 
-        # B) ungrouped: name == Size
+        # Fallback: direct "Size"
         for sp in specs:
             if not isinstance(sp, dict):
                 continue
-            name = (sp.get("name") or "").strip()
-            val = sp.get("value")
-            if val is None:
-                continue
-            nlow = name.lower()
-            if _is_packaging_label(nlow):
-                continue
-            if nlow == "size":
-                parsed = _parse_size_text_to_cm_pair(str(val))
-                if parsed:
-                    return _format_size(parsed[0], parsed[1])
+            if str(sp.get("name") or "").strip().lower() == "size":
+                val = sp.get("value")
+                out = parse_size(str(val))
+                if out:
+                    return out
 
     title = product.get("title")
-    if isinstance(title, str) and title.strip():
-        parsed = _parse_size_text_to_cm_pair(title)
-        if parsed:
-            return _format_size(parsed[0], parsed[1])
-
-    variants = product.get("variants")
-    if isinstance(variants, dict):
-        selected = variants.get("selected")
-        if isinstance(selected, dict):
-            v = selected.get("size_name") or selected.get("size")
-            if v:
-                parsed = _parse_size_text_to_cm_pair(str(v))
-                if parsed:
-                    return _format_size(parsed[0], parsed[1])
-
-    return None
-
-
-def _contains_voucher_coupon_key(key: str) -> bool:
-    k = (key or "").lower()
-    return ("voucher" in k) or ("coupon" in k)
+    out = parse_size(title) if isinstance(title, str) else None
+    return out
 
 
 def extract_base_price(product: dict):
-    """
-    Base price (displayed price) excluding voucher/coupon.
-    """
-    if not isinstance(product, dict):
-        return None
-
-    def price_from_price_obj(pobj):
-        if pobj is None:
-            return None
-        if isinstance(pobj, (int, float, str)):
-            return _to_float(pobj)
-        if isinstance(pobj, dict):
-            for k in ["value", "raw", "amount"]:
-                if k in pobj and not _contains_voucher_coupon_key(k):
-                    f = _to_float(pobj.get(k))
-                    if f is not None and f > 0:
-                        return f
-        return None
-
+    """Normal displayed price (not voucher)."""
+    # 1) buybox.price
     buybox = product.get("buybox")
     if isinstance(buybox, dict):
-        f = price_from_price_obj(buybox.get("price"))
-        if f:
+        p = buybox.get("price")
+        f = to_float(p)
+        if f and f > 0:
             return f
 
+    # 2) buybox_winner.price
     bbw = product.get("buybox_winner")
     if isinstance(bbw, dict):
-        f = price_from_price_obj(bbw.get("price"))
-        if f:
+        p = bbw.get("price")
+        f = to_float(p)
+        if f and f > 0:
             return f
 
-    p2 = product.get("price")
-    f = price_from_price_obj(p2)
-    if f:
+    # 3) product.price
+    f = to_float(product.get("price"))
+    if f and f > 0:
         return f
 
-    for k in ["price_string", "current_price", "displayed_price", "main_price", "price_current"]:
-        if k in product and not _contains_voucher_coupon_key(k):
-            f = _to_float(product.get(k))
-            if f is not None and f > 0:
-                return f
-
+    # 4) offers[0].price
     offers = product.get("offers")
     if isinstance(offers, list) and offers:
         first = offers[0]
         if isinstance(first, dict):
-            f = price_from_price_obj(first.get("price"))
-            if f:
+            f = to_float(first.get("price"))
+            if f and f > 0:
                 return f
 
     return None
 
 
-def extract_voucher_price(product: dict, base_price: float | None):
+def extract_voucher_price(product: dict):
     """
-    Extracts voucher/coupon APPLIED price (e.g. 'Voucher price £59.99').
-    Critical: ignores percentages like '20%'.
+    Finds 'Voucher price £xx.xx' anywhere in payload.
+    ONLY accepts strings containing BOTH 'voucher price' and '£'.
+    This prevents '20%' being parsed as 20.
     """
-    if not isinstance(product, dict):
-        return None
-
-    candidates = []
-
-    def add(score, value):
-        f = _to_money_float(value)  # IMPORTANT: money-only parsing
-        if f is not None and f > 0:
-            candidates.append((score, f))
-
-    def parse_from_string(s: str):
-        if not s:
-            return
-        t = s.lower()
-
-        # strongest phrase
-        if "voucher price" in t:
-            add(250, s)
-            return
-
-        # other coupon/voucher hints
-        if "voucher" in t or "coupon" in t:
-            # only accept if string actually contains £
-            if "£" in s:
-                add(180, s)
-
     def walk(obj):
         if isinstance(obj, dict):
-            for k, v in obj.items():
-                key = str(k).lower()
-
-                # direct voucher/coupon price keys
-                if (("voucher" in key or "coupon" in key) and "price" in key) or ("voucher price" in key):
-                    add(220, v)
-
-                if isinstance(v, str):
-                    parse_from_string(v)
-
-                walk(v)
-
+            for v in obj.values():
+                out = walk(v)
+                if out is not None:
+                    return out
         elif isinstance(obj, list):
-            for item in obj:
-                walk(item)
-
+            for it in obj:
+                out = walk(it)
+                if out is not None:
+                    return out
         elif isinstance(obj, str):
-            parse_from_string(obj)
-
-    walk(product)
-
-    if not candidates:
+            t = obj.lower()
+            if "voucher price" in t and "£" in obj:
+                return parse_gbp_from_text(obj)
         return None
 
-    # Prefer <= base price if known
-    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-
-    if base_price is not None and base_price > 0:
-        valid = [c for c in candidates if c[1] <= base_price]
-        if valid:
-            valid.sort(key=lambda x: (x[0], x[1]), reverse=True)
-            return valid[0][1]
-
-    return candidates[0][1]
-
+    return walk(product)
 
 
 # ----------------- Main -----------------
@@ -409,13 +242,9 @@ if st.button("Fetch Prices"):
                     row["Size"] = extract_size(product)
 
                     base_price = extract_base_price(product)
-                    voucher_price = extract_voucher_price(product, base_price)
+                    voucher_price = extract_voucher_price(product)
 
-                    # Final price rule: if voucher exists and is <= base price, final = voucher else base
-                    if base_price is not None and voucher_price is not None and voucher_price > 0 and voucher_price <= base_price:
-                        row["Final price"] = voucher_price
-                    else:
-                        row["Final price"] = base_price
+                    row["Final price"] = voucher_price if voucher_price is not None else base_price
 
             except Exception:
                 pass
