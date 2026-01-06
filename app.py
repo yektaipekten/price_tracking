@@ -1,20 +1,22 @@
 # app.py
 import os
-import streamlit as st
-import pandas as pd
-import requests
 import time
 from io import BytesIO
 from datetime import datetime, timezone
+
+import pandas as pd
+import requests
+import streamlit as st
 
 st.set_page_config(page_title="Price Tracking", layout="wide")
 
 # ---- CONFIG ----
 API_KEY = st.secrets.get("RAINFOREST_API_KEY") or os.environ.get("RAINFOREST_API_KEY")
-MARKETPLACE = "amazon.co.uk"  
 
-# Optional simple password protection (same as your reference app)
-APP_PASSWORD = st.secrets.get("APP_PASSWORD")  # optional
+MARKETPLACE = "amazon.co.uk"
+
+# Optional simple password protection (APP_PASSWORD in Streamlit secrets)
+APP_PASSWORD = st.secrets.get("APP_PASSWORD")
 if APP_PASSWORD:
     pw = st.text_input("Password", type="password")
     if pw != APP_PASSWORD:
@@ -29,9 +31,9 @@ asins_text = st.text_area(
     height=150,
     value="B0D7J69H1L"
 )
-ASINS = [a.strip() for a in asins_text.splitlines() if a.strip()]
+ASINS = [a.strip().upper() for a in asins_text.splitlines() if a.strip()]
 
-# ---- Mapping (COPY from your app) ----
+# ---- Mapping (keep reading ASINs.csv, but we only USE Size from it) ----
 mapping_dict = {}
 mapping_path = "ASINs.csv"
 if os.path.exists(mapping_path):
@@ -49,10 +51,11 @@ if os.path.exists(mapping_path):
                 map_df["Size"] = None
             else:
                 map_df.columns = ["ASIN", "Design", "Size"] + list(map_df.columns[3:])
-        if "Design" not in map_df.columns:
-            map_df["Design"] = None
+
         if "Size" not in map_df.columns:
             map_df["Size"] = None
+        if "Design" not in map_df.columns:
+            map_df["Design"] = None
 
         map_df["ASIN"] = map_df["ASIN"].astype(str).str.strip().str.upper()
         mapping_dict = map_df.set_index("ASIN")[["Design", "Size"]].T.to_dict()
@@ -61,38 +64,27 @@ if os.path.exists(mapping_path):
         st.warning(f"Could not read mapping file {mapping_path}: {e}")
 
 # ---- Helpers ----
-def extract_price_fields(product: dict):
+def extract_price(product: dict):
     """
-    Rainforest product payloads vary. We try buybox.price first, then product.price as fallback.
+    Rainforest product payloads vary.
+    We try buybox.price first, then product.price as fallback.
+    Returns price value only (you asked not to display currency/etc).
     """
-    price = None
-    currency = None
-    availability = None
-    buybox_seller = None
-
     if not isinstance(product, dict):
-        return price, currency, availability, buybox_seller
-
-    availability = product.get("availability")
+        return None
 
     buybox = product.get("buybox")
     if isinstance(buybox, dict):
         p = buybox.get("price")
-        if isinstance(p, dict):
-            price = p.get("value")
-            currency = p.get("currency")
-        seller = buybox.get("seller")
-        if isinstance(seller, dict):
-            buybox_seller = seller.get("name")
+        if isinstance(p, dict) and p.get("value") is not None:
+            return p.get("value")
 
     p2 = product.get("price")
-    if isinstance(p2, dict):
-        if price is None:
-            price = p2.get("value")
-        if currency is None:
-            currency = p2.get("currency")
+    if isinstance(p2, dict) and p2.get("value") is not None:
+        return p2.get("value")
 
-    return price, currency, availability, buybox_seller
+    return None
+
 
 def extract_brand(product: dict):
     """
@@ -111,11 +103,12 @@ def extract_brand(product: dict):
             if not isinstance(s, dict):
                 continue
             name = (s.get("name") or "").strip().lower()
-            val = (s.get("value") or "")
-            if name == "brand" and str(val).strip():
+            val = s.get("value")
+            if name == "brand" and val is not None and str(val).strip():
                 return str(val).strip()
 
     return None
+
 
 # ---- Main ----
 if st.button("Fetch Prices"):
@@ -128,77 +121,55 @@ if st.button("Fetch Prices"):
         results = []
         total = len(ASINS)
 
-        # credits (COPY logic from your app)
         credits_used = 0
         credits_remaining = None
 
         for i, asin in enumerate(ASINS, start=1):
-            asin_norm = asin.strip().upper()
-
-            with st.spinner(f"Fetching {asin_norm} ({i}/{total})"):
+            with st.spinner(f"Fetching {asin} ({i}/{total})"):
                 url = "https://api.rainforestapi.com/request"
                 params = {
                     "api_key": API_KEY,
                     "type": "product",
-                    "amazon_domain": MARKETPLACE,
-                    "asin": asin_norm
+                    "amazon_domain": MARKETETPLACE if False else MARKETPLACE,  # keep literal MARKETPLACE, avoids typo edits
+                    "asin": asin,
                 }
 
+                # Only columns you asked, in the order you asked:
                 row = {
-                    "ASIN": asin_norm,
                     "Brand": None,
-                    "Design": None,
+                    "ASIN": asin,
                     "Size": None,
                     "Price": None,
-                    "Currency": None,
-                    "Availability": None,
-                    "Buybox Seller": None,
-                    "Fetched At (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                    "Error": None,
+                    "Date (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 }
 
                 try:
                     r = requests.get(url, params=params, timeout=30)
-                    data = r.json()
-                    
+                    data = r.json() if r is not None else {}
+
                     info = data.get("request_info", {}) or {}
-                    
                     credits_used = info.get("credits_used", credits_used)
                     credits_remaining = info.get("credits_remaining", credits_remaining)
-                    
-                    st.write("HTTP status:", r.status_code)
-                    st.write("request_info:", {k: info.get(k) for k in ["success", "status_code", "message", "credits_used", "credits_remaining"]})
-                    if "error" in data:
-                         st.write("top_level_error:", data.get("error"))
-                    
+
                     product = data.get("product")
                     if not isinstance(product, dict) or not product:
-                         row["Error"] = info.get("message") or data.get("error") or "No product returned"
-                         product = {}
+                        # keep row as-is, but it's useful to know why in logs; user asked to keep page clean.
+                        product = {}
 
-
-                    # mapping override (COPY)
-                    map_entry = mapping_dict.get(asin_norm)
+                    # Size from mapping (only Size)
+                    map_entry = mapping_dict.get(asin)
                     if map_entry:
-                        m_design = map_entry.get("Design")
                         m_size = map_entry.get("Size")
-                        if pd.notna(m_design) and str(m_design).strip() != "":
-                            row["Design"] = m_design
                         if pd.notna(m_size) and str(m_size).strip() != "":
                             row["Size"] = m_size
 
-                    # brand (new)
+                    # Brand + Price from API
                     row["Brand"] = extract_brand(product)
+                    row["Price"] = extract_price(product)
 
-                    # price fields (new)
-                    price, currency, availability, seller = extract_price_fields(product)
-                    row["Price"] = price
-                    row["Currency"] = currency
-                    row["Availability"] = availability
-                    row["Buybox Seller"] = seller
-
-                except Exception as e:
-                    row["Error"] = str(e)
+                except Exception:
+                    # User requested not to show extra columns/errors in table
+                    pass
 
                 results.append(row)
 
@@ -207,10 +178,13 @@ if st.button("Fetch Prices"):
 
         df = pd.DataFrame(results)
 
+        # Force exact column order
+        df = df[["Brand", "ASIN", "Size", "Price", "Date (UTC)"]]
+
         st.subheader("Results")
         st.dataframe(df, use_container_width=True)
 
-        # Excel export (COPY pattern)
+        # Excel export
         out = BytesIO()
         try:
             with pd.ExcelWriter(out, engine="openpyxl") as writer:
@@ -233,6 +207,6 @@ if st.button("Fetch Prices"):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-        # credits display (COPY)
+        # Credits display (keep as you wanted)
         if credits_remaining is not None:
             st.info(f"Credits used in last response: {credits_used}; Credits remaining (approx): {credits_remaining}")
