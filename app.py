@@ -27,7 +27,7 @@ st.write("Click **Fetch Prices** to pull current price from Amazon (Rainforest A
 asins_text = st.text_area(
     "ASINs (one per line)",
     height=150,
-    value="B0D7J69H1L"
+    value="B0D7J69H1L,B0D945WJVT"
 )
 ASINS = [a.strip() for a in asins_text.splitlines() if a.strip()]
 
