@@ -36,7 +36,7 @@ def _to_float(x):
             return None
         try:
             return float(m.group(1).replace(",", "."))
-        except:
+        except Exception:
             return None
     if isinstance(x, dict):
         for k in ["value", "amount", "raw", "price", "final_price", "voucher_price", "coupon_price"]:
@@ -55,6 +55,77 @@ def _pct(a, b):
     if p < 0:
         return 0
     return int(round(p))
+
+
+def _fmt_num(x: float):
+    if x is None:
+        return None
+    if abs(x - int(x)) < 1e-9:
+        return str(int(x))
+    return str(x).rstrip("0").rstrip(".")
+
+
+def _normalize_to_cm(num: float, unit: str) -> float:
+    unit = (unit or "").lower()
+    if unit in ["m", "metre", "metres"]:
+        return num * 100.0
+    if unit == "mm":
+        return num / 10.0
+    return num
+
+
+def _clean_x(s: str) -> str:
+    return (s or "").replace("×", "x").replace("*", "x")
+
+
+def _is_packaging_label(name: str) -> bool:
+    n = (name or "").strip().lower()
+    return any(k in n for k in ["package", "packaging", "parcel", "box"])
+
+
+def _parse_size_text_to_cm_pair(text: str):
+    """
+    Parses size from free text:
+      - "122 x 170 cm (Rectangular)"
+      - "160*230CM"
+      - "2.3 x 1.6 m"
+    Returns (a_cm, b_cm) or None.
+    """
+    if not text or not isinstance(text, str):
+        return None
+
+    s = _clean_x(text).lower()
+    s = s.split(";")[0]
+    s = re.sub(r"\(.*?\)", "", s)  # remove parentheses
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Pattern: 122 x 170 cm
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*(cm|mm|m|metre|metres)\b", s)
+    if m:
+        a = float(m.group(1).replace(",", "."))
+        b = float(m.group(2).replace(",", "."))
+        unit = m.group(3)
+        a_cm = _normalize_to_cm(a, unit)
+        b_cm = _normalize_to_cm(b, unit)
+        return (a_cm, b_cm)
+
+    # Some titles: "160x230CM" without spaces
+    s2 = s.replace(" ", "")
+    m2 = re.search(r"(\d{2,4}(?:[.,]\d+)?)x(\d{2,4}(?:[.,]\d+)?)\s*(cm|mm|m)\b", s2)
+    if m2:
+        a = float(m2.group(1).replace(",", "."))
+        b = float(m2.group(2).replace(",", "."))
+        unit = m2.group(3)
+        a_cm = _normalize_to_cm(a, unit)
+        b_cm = _normalize_to_cm(b, unit)
+        return (a_cm, b_cm)
+
+    return None
+
+
+def _format_size(a_cm: float, b_cm: float) -> str:
+    # Keep as "122x170cm"
+    return f"{_fmt_num(a_cm)}x{_fmt_num(b_cm)}cm"
 
 
 def extract_brand(product: dict):
@@ -132,10 +203,7 @@ def extract_price(product: dict):
 
 
 def extract_list_price(product: dict):
-    """
-    Finds 'before/rrp/list/was' price for computing % Discount.
-    This is where your discount percent was missing: we broaden all common Rainforest paths.
-    """
+    """Finds 'before/rrp/list/was' price for computing % Discount."""
     if not isinstance(product, dict):
         return None
 
@@ -208,7 +276,7 @@ def extract_discount_percent(product: dict, list_price: float | None, base_price
                 return int(m.group(1))
 
     # nested common blocks
-    for block_key in ["deal", "deals", "savings", "promotion", "promotions", "buybox"]:
+    for block_key in ["deal", "deals", "savings", "promotion", "promotions", "buybox", "buybox_winner"]:
         blk = product.get(block_key)
         if isinstance(blk, dict):
             for k in ["discount_percentage", "savings_percentage", "percent_off", "deal_percentage"]:
@@ -226,194 +294,9 @@ def extract_discount_percent(product: dict, list_price: float | None, base_price
     return 0
 
 
-def _normalize_cm_value(num: float, unit: str):
-    """Convert m/mm->cm. Return cm float."""
-    if unit == "m":
-        return num * 100.0
-    if unit == "mm":
-        return num / 10.0
-    return num
-
-
-def _fmt_num(x: float):
-    if x is None:
-        return None
-    if abs(x - int(x)) < 1e-9:
-        return str(int(x))
-    return str(x).rstrip("0").rstrip(".")
-
-
-def extract_thickness(product: dict):
-    """
-    Thickness like 0.5cm.
-    Fix: if spec isn't directly 'thickness', also parse third dimension from item dimensions like "170 x 122 x 0.5 cm".
-    """
-    if not isinstance(product, dict):
-        return None
-
-    # 1) direct thickness-ish specs
-    specs = product.get("specifications", [])
-    if isinstance(specs, list):
-        for sp in specs:
-            if not isinstance(sp, dict):
-                continue
-            name = (sp.get("name") or "").strip().lower()
-            val = sp.get("value")
-            if val is None:
-                continue
-
-            if any(k in name for k in ["thickness", "pile height", "pileheight", "pile", "height", "depth"]):
-                s = str(val).lower()
-                m = re.search(r"(\d+(?:[.,]\d+)?)\s*(cm|mm|m)\b", s.replace(" ", ""))
-                if m:
-                    num = float(m.group(1).replace(",", "."))
-                    unit = m.group(2)
-                    cm = _normalize_cm_value(num, unit)
-                    return f"{_fmt_num(cm)}cm"
-
-    # 2) parse third dimension from any "dimensions" fields
-    dimension_strings = []
-
-    # common locations
-    for k in ["item_dimensions", "dimensions", "item_size", "size", "size_name"]:
-        v = product.get(k)
-        if isinstance(v, str) and v.strip():
-            dimension_strings.append(v)
-
-    # from specs: item dimensions
-    if isinstance(specs, list):
-        for sp in specs:
-            if not isinstance(sp, dict):
-                continue
-            n = (sp.get("name") or "").strip().lower()
-            v = sp.get("value")
-            if v is None:
-                continue
-            if any(k in n for k in ["item dimensions", "dimensions"]):
-                dimension_strings.append(str(v))
-
-    for ds in dimension_strings:
-        s = ds.lower().replace("×", "x").replace(" ", "")
-        # match "170x122x0.5cm" or "170x122x0.5cm;..."
-        m = re.search(r"(\d+(?:[.,]\d+)?)x(\d+(?:[.,]\d+)?)x(\d+(?:[.,]\d+)?)(cm|mm|m)\b", s)
-        if m:
-            t = float(m.group(3).replace(",", "."))
-            unit = m.group(4)
-            cm = _normalize_cm_value(t, unit)
-            return f"{_fmt_num(cm)}cm"
-
-    return None
-
-
-def extract_size(product: dict):
-    """
-    Clean size like 122x170cm (ONLY).
-    Fix: prefer explicit "Size" / "Size Name" spec and "variants.selected.size_name".
-    Also normalizes "160 x 220 cm" -> "160x220cm"
-    """
-    if not isinstance(product, dict):
-        return None
-
-    raw_candidates = []
-
-    variants = product.get("variants")
-    if isinstance(variants, dict):
-        selected = variants.get("selected")
-        if isinstance(selected, dict):
-            for key in ["size_name", "size", "dimensions", "value", "name"]:
-                v = selected.get(key)
-                if v:
-                    raw_candidates.append(str(v))
-
-    attrs = product.get("attributes")
-    if isinstance(attrs, dict):
-        for key in ["size_name", "size", "dimensions"]:
-            v = attrs.get(key)
-            if v:
-                raw_candidates.append(str(v))
-
-    specs = product.get("specifications", [])
-    if isinstance(specs, list):
-        for sp in specs:
-            if not isinstance(sp, dict):
-                continue
-            name = (sp.get("name") or "").strip().lower()
-            val = sp.get("value")
-            if val is None:
-                continue
-
-            # strong preference
-            if "size name" in name or (name == "size"):
-                raw_candidates.append(str(val))
-                continue
-
-            if any(k in name for k in ["rug size", "carpet size"]):
-                raw_candidates.append(str(val))
-                continue
-
-            # keep dimensions but lower priority
-            if any(k in name for k in ["item dimensions", "dimensions"]):
-                raw_candidates.append(str(val))
-
-    def normalize_size(s: str):
-        s0 = s.lower().strip()
-        s0 = s0.split(";")[0]
-        s0 = re.sub(r"\(.*?\)", "", s0).strip()
-        s0 = s0.replace("×", "x")
-        s0 = re.sub(r"\s*x\s*", "x", s0)
-
-        # "160 x 220 cm"
-        m = re.search(r"(\d{2,4}(?:[.,]\d+)?)x(\d{2,4}(?:[.,]\d+)?)(?:x(\d{1,4}(?:[.,]\d+)?))?\s*(cm|mm|m)\b", s0)
-        if not m:
-            # "2.2L x 1.6W metres"
-            m2 = re.search(r"(\d+(?:[.,]\d+)?)\s*[lw]\s*x\s*(\d+(?:[.,]\d+)?)\s*[lw]\s*(metre|metres|m)\b", s0)
-            if m2:
-                a = float(m2.group(1).replace(",", ".")) * 100
-                b = float(m2.group(2).replace(",", ".")) * 100
-                return f"{int(round(a))}x{int(round(b))}cm"
-            return None
-
-        a = float(m.group(1).replace(",", "."))
-        b = float(m.group(2).replace(",", "."))
-        unit = m.group(4)
-
-        # normalize to cm
-        if unit == "m":
-            a *= 100
-            b *= 100
-        elif unit == "mm":
-            a /= 10
-            b /= 10
-
-        return f"{_fmt_num(a)}x{_fmt_num(b)}cm"
-
-    prioritized = []
-    for c in raw_candidates:
-        lc = c.lower()
-        score = 0
-        if "size" in lc:
-            score += 5
-        if "size name" in lc:
-            score += 3
-        if "cm" in lc or "metre" in lc or "m" in lc:
-            score += 2
-        if "kg" in lc:
-            score -= 3
-        prioritized.append((score, c))
-
-    prioritized.sort(key=lambda x: x[0], reverse=True)
-
-    for _, cand in prioritized:
-        norm = normalize_size(cand)
-        if norm:
-            return norm
-
-    return None
-
-
 def _deep_find_voucher_candidates(obj, path=""):
     """
-    Recursively scan payload for voucher price signals.
+    Recursively scan payload for voucher/coupon price signals.
     Returns list of tuples: (score, price_float, path, evidence_str)
     """
     out = []
@@ -428,7 +311,7 @@ def _deep_find_voucher_candidates(obj, path=""):
             key = str(k).lower()
             p = f"{path}.{k}" if path else str(k)
 
-            # strongest: keys that explicitly mean voucher price
+            # strongest: keys that explicitly mean voucher/coupon price
             if ("voucher" in key or "coupon" in key) and "price" in key:
                 add(120, v, p, f"key={k}")
 
@@ -463,28 +346,103 @@ def _deep_find_voucher_candidates(obj, path=""):
 
 def extract_voucher_price(product: dict, base_price: float | None):
     """
-    Finds explicit voucher price and returns it.
-    Fix: deep recursive scan + choose best candidate <= base_price (closest to base but lower).
+    Finds explicit voucher/coupon price and returns it.
+    Strategy:
+      - deep recursive scan
+      - choose best candidate <= base_price (closest to base but lower), else best scored.
     """
     if not isinstance(product, dict):
         return None
 
     cands = _deep_find_voucher_candidates(product)
-
     if not cands:
         return None
 
-    # If we know base price, voucher price should be <= base
     if base_price is not None and base_price > 0:
         valid = [c for c in cands if c[1] <= base_price]
         if valid:
-            # sort by score then by price (higher price preferred if <= base)
             valid.sort(key=lambda x: (x[0], x[1]), reverse=True)
             return valid[0][1]
 
-    # fallback: best-scored candidate
     cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return cands[0][1]
+
+
+def extract_size(product: dict):
+    """
+    EXACT requirement:
+      - take size from Product details -> Measurements -> Size
+      - OR from title
+    No thickness. No package dimensions.
+
+    Returns like: "122x170cm" or None
+    """
+    if not isinstance(product, dict):
+        return None
+
+    # 1) Try specifications: Measurements -> Size
+    specs = product.get("specifications", [])
+    if isinstance(specs, list):
+        # Strategy A: find a "Measurements" group (some payloads use group_name/category)
+        for sp in specs:
+            if not isinstance(sp, dict):
+                continue
+
+            # Some rainforest payloads: {"name":"Size","value":"122 x 170 cm (Rectangular)","group_name":"Measurements"}
+            group = (sp.get("group_name") or sp.get("group") or sp.get("section") or sp.get("category") or "")
+            group_l = str(group).strip().lower()
+            name = (sp.get("name") or "").strip()
+            val = sp.get("value")
+
+            if val is None:
+                continue
+
+            if _is_packaging_label(name) or _is_packaging_label(group_l):
+                continue
+
+            if group_l == "measurements" and name.strip().lower() == "size":
+                parsed = _parse_size_text_to_cm_pair(str(val))
+                if parsed:
+                    return _format_size(parsed[0], parsed[1])
+
+        # Strategy B: if grouping not available, just search for a "Size" row
+        for sp in specs:
+            if not isinstance(sp, dict):
+                continue
+            name = (sp.get("name") or "").strip()
+            val = sp.get("value")
+            if val is None:
+                continue
+
+            nlow = name.lower()
+            if _is_packaging_label(nlow):
+                continue
+
+            # accept only exact "Size" (avoid "Package Dimensions" etc.)
+            if nlow == "size":
+                parsed = _parse_size_text_to_cm_pair(str(val))
+                if parsed:
+                    return _format_size(parsed[0], parsed[1])
+
+    # 2) Fallback: parse from title
+    title = product.get("title")
+    if isinstance(title, str) and title.strip():
+        parsed = _parse_size_text_to_cm_pair(title)
+        if parsed:
+            return _format_size(parsed[0], parsed[1])
+
+    # 3) Variant selected size_name (optional fallback; harmless and often correct)
+    variants = product.get("variants")
+    if isinstance(variants, dict):
+        selected = variants.get("selected")
+        if isinstance(selected, dict):
+            v = selected.get("size_name") or selected.get("size")
+            if v:
+                parsed = _parse_size_text_to_cm_pair(str(v))
+                if parsed:
+                    return _format_size(parsed[0], parsed[1])
+
+    return None
 
 
 # ----------------- Main -----------------
@@ -509,7 +467,6 @@ if st.button("Fetch Prices"):
                 "Brand": None,
                 "ASIN": asin,
                 "Size": None,
-                "Thickness": None,
                 "% Discount": 0,
                 "% Voucher": 0,
                 "Final price": None,
@@ -522,7 +479,7 @@ if st.button("Fetch Prices"):
                     params={
                         "api_key": API_KEY,
                         "type": "product",
-                        "amazon_domain": MARKETETPLACE if False else MARKETPLACE,  # keep as-is
+                        "amazon_domain": MARKETPLACE,
                         "asin": asin,
                     },
                     timeout=30,
@@ -537,19 +494,15 @@ if st.button("Fetch Prices"):
                 if isinstance(product, dict) and product:
                     row["Brand"] = extract_brand(product)
                     row["Size"] = extract_size(product)
-                    row["Thickness"] = extract_thickness(product)
 
-                    base_price = extract_price(product)          # displayed "Buy new" price
-                    list_price = extract_list_price(product)     # was/rrp/etc
+                    base_price = extract_price(product)      # displayed current price
+                    list_price = extract_list_price(product) # was/rrp/etc for % discount
 
-                    # % Discount (explicit if exists, else compute from list->base)
                     row["% Discount"] = extract_discount_percent(product, list_price, base_price)
 
-                    # voucher price (explicit "voucher price £xx.xx")
                     voucher_price = extract_voucher_price(product, base_price)
 
-                    # Final price rule:
-                    # if voucher price exists and is lower/equal than base, final = voucher_price
+                    # Final price + % voucher
                     if base_price is not None and voucher_price is not None and voucher_price > 0 and voucher_price <= base_price:
                         row["% Voucher"] = _pct(base_price, voucher_price)
                         row["Final price"] = voucher_price
@@ -558,6 +511,7 @@ if st.button("Fetch Prices"):
                         row["Final price"] = base_price
 
             except Exception:
+                # keep row with None/0 if request fails
                 pass
 
             results.append(row)
@@ -566,7 +520,7 @@ if st.button("Fetch Prices"):
         time.sleep(0.25)
 
     df = pd.DataFrame(results, columns=[
-        "Brand", "ASIN", "Size", "Thickness", "% Discount", "% Voucher", "Final price", "Date (UTC)"
+        "Brand", "ASIN", "Size", "% Discount", "% Voucher", "Final price", "Date (UTC)"
     ])
 
     st.subheader("Results")
