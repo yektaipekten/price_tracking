@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 import streamlit as st
+import base64
+
 
 # ----------------- Page config -----------------
 st.set_page_config(page_title="Competitors Pricing strategy", layout="wide")
@@ -20,37 +22,44 @@ LOGO_PATH = "assets/logo.png"  # create assets/ and place logo.png inside
 
 # ----------------- CSS -----------------
 # ----------------- CSS -----------------
+def file_to_base64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+bg_b64 = file_to_base64("image.png")
+
 st.markdown(
-    """
+    f"""
     <style>
-      .stApp {
-        background: url("image.png") no-repeat center center fixed;
+      .stApp {{
+        background-image: url("data:image/png;base64,{bg_b64}");
         background-size: cover;
-      }
+        background-position: center;
+        background-repeat: no-repeat;
+        background-attachment: fixed;
+      }}
 
       /* Make content boxes readable on image */
-      .block-container {
+      .block-container {{
         background: rgba(255, 255, 255, 0.92);
         border-radius: 18px;
         padding: 24px;
         margin-top: 20px;
-      }
+      }}
 
-      /* Page title */
-      .page-title {
+      .page-title {{
         font-size: 44px;
         font-weight: 800;
         color: #111111;
         margin: 0 0 6px 0;
-      }
-      .page-subtitle {
+      }}
+      .page-subtitle {{
         font-size: 14px;
         color: #333;
         margin: 0 0 18px 0;
-      }
+      }}
 
-      /* Credits box */
-      .credits-box {
+      .credits-box {{
         background: #ffffff;
         color: #000000;
         border: 1px solid #e6e6e6;
@@ -58,11 +67,23 @@ st.markdown(
         padding: 12px 14px;
         font-size: 14px;
         line-height: 1.4;
-      }
+      }}
+
+      /* Title row layout */
+      .title-row {{
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: 6px;
+      }}
+      .title-logo {{
+        height: 46px;
+      }}
     </style>
     """,
     unsafe_allow_html=True
 )
+
 
 
 # ----------------- Header -----------------
