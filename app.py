@@ -11,7 +11,7 @@ st.set_page_config(page_title="Price Tracking", layout="wide")
 
 # ---- CONFIG ----
 API_KEY = st.secrets.get("RAINFOREST_API_KEY") or os.environ.get("RAINFOREST_API_KEY")
-MARKETPLACE = "amazon.co.uk"  # UK
+MARKETPLACE = "amazon.uk"  # UK
 
 # Optional simple password protection (same as your reference app)
 APP_PASSWORD = st.secrets.get("APP_PASSWORD")  # optional
@@ -160,6 +160,11 @@ if st.button("Fetch Prices"):
                 try:
                     r = requests.get(url, params=params, timeout=30)
                     data = r.json()
+
+                    st.write("HTTP status:", r.status_code)
+                    st.write("Top-level keys:", list(data.keys())[:20])
+                    st.json(data.get("request_info", {}))
+
 
                     # credits (COPY)
                     info = data.get("request_info", {})
