@@ -39,23 +39,13 @@ def _to_float(x):
         except Exception:
             return None
     if isinstance(x, dict):
-        # NOTE: Do NOT include voucher/coupon keys here (base price extraction must avoid them).
+        # IMPORTANT: Do NOT include voucher/coupon keys here.
         for k in ["value", "amount", "raw", "price", "final_price"]:
             if k in x:
                 f = _to_float(x.get(k))
                 if f is not None:
                     return f
     return None
-
-
-def _pct(a, b):
-    """percent reduction from a -> b, e.g. a=74.99 b=59.99 => 20"""
-    if a is None or b is None or a <= 0:
-        return 0
-    p = (a - b) / a * 100
-    if p < 0:
-        return 0
-    return int(round(p))
 
 
 def _fmt_num(x: float):
@@ -207,7 +197,6 @@ def extract_size(product: dict):
     return None
 
 
-# ---------- PRICE EXTRACTION (FIXED) ----------
 def _contains_voucher_coupon_key(key: str) -> bool:
     k = (key or "").lower()
     return ("voucher" in k) or ("coupon" in k)
@@ -215,11 +204,7 @@ def _contains_voucher_coupon_key(key: str) -> bool:
 
 def extract_base_price(product: dict):
     """
-    Base price MUST be the displayed price BEFORE voucher/coupon application.
-    Therefore we:
-      - prefer buybox / buybox_winner price.value/raw
-      - ignore any dict keys containing voucher/coupon
-      - ignore any fields that are explicitly voucher/coupon price
+    Base price (displayed price) excluding voucher/coupon.
     """
     if not isinstance(product, dict):
         return None
@@ -230,7 +215,6 @@ def extract_base_price(product: dict):
         if isinstance(pobj, (int, float, str)):
             return _to_float(pobj)
         if isinstance(pobj, dict):
-            # only safe keys
             for k in ["value", "raw", "amount"]:
                 if k in pobj and not _contains_voucher_coupon_key(k):
                     f = _to_float(pobj.get(k))
@@ -238,266 +222,95 @@ def extract_base_price(product: dict):
                         return f
         return None
 
-    # 1) buybox.price
     buybox = product.get("buybox")
     if isinstance(buybox, dict):
-        p = buybox.get("price")
-        f = price_from_price_obj(p)
+        f = price_from_price_obj(buybox.get("price"))
         if f:
             return f
 
-    # 2) buybox_winner.price
     bbw = product.get("buybox_winner")
     if isinstance(bbw, dict):
-        p = bbw.get("price")
-        f = price_from_price_obj(p)
+        f = price_from_price_obj(bbw.get("price"))
         if f:
             return f
 
-    # 3) product.price
     p2 = product.get("price")
     f = price_from_price_obj(p2)
     if f:
         return f
 
-    # 4) fallback string fields (avoid voucher/coupon labelled)
     for k in ["price_string", "current_price", "displayed_price", "main_price", "price_current"]:
         if k in product and not _contains_voucher_coupon_key(k):
             f = _to_float(product.get(k))
             if f is not None and f > 0:
                 return f
 
-    # 5) offers[0].price
     offers = product.get("offers")
     if isinstance(offers, list) and offers:
         first = offers[0]
         if isinstance(first, dict):
-            p = first.get("price")
-            f = price_from_price_obj(p)
+            f = price_from_price_obj(first.get("price"))
             if f:
                 return f
 
     return None
 
 
-def _deep_find_price_candidates(obj, want="list_price"):
+def extract_voucher_price(product: dict, base_price: float | None):
     """
-    Deep scan for list/rrp/was/before/strike price candidates.
-    want="list_price" only (exclude voucher/coupon).
-    Returns list of (score, price_float).
-    """
-    out = []
-
-    def add(score, v):
-        f = _to_float(v) if not isinstance(v, dict) else _to_float(v)
-        if f is not None and f > 0:
-            out.append((score, f))
-
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            key = str(k).lower()
-
-            # ignore voucher/coupon branches entirely
-            if _contains_voucher_coupon_key(key):
-                continue
-
-            if want == "list_price":
-                # strong signals for "before price"
-                if any(t in key for t in ["list_price", "rrp", "was_price", "before_price", "original_price",
-                                          "strikethrough", "strike", "price_before_discount", "price_was", "old_price"]):
-                    add(120, v)
-
-            out.extend(_deep_find_price_candidates(v, want=want))
-
-    elif isinstance(obj, list):
-        for item in obj:
-            out.extend(_deep_find_price_candidates(item, want=want))
-
-    return out
-
-
-def extract_list_price(product: dict):
-    """
-    More robust list/was/rrp/before price extraction:
-      - shallow candidates
-      - then deep scan
+    Voucher price (e.g., 'Voucher price £59.99') deep scan.
+    Returns a float or None.
     """
     if not isinstance(product, dict):
         return None
 
     candidates = []
 
-    # shallow (same as before)
-    for k in [
-        "list_price", "rrp", "was_price", "price_was", "price_before_discount",
-        "before_price", "original_price", "strikethrough_price", "price_original"
-    ]:
-        if k in product and not _contains_voucher_coupon_key(k):
-            candidates.append(product.get(k))
-
-    p = product.get("price")
-    if isinstance(p, dict):
-        for k in ["before_price", "was_price", "list_price", "rrp", "original", "old", "strike", "strikethrough", "raw_before"]:
-            if k in p and not _contains_voucher_coupon_key(k):
-                candidates.append(p.get(k))
-
-    buybox = product.get("buybox")
-    if isinstance(buybox, dict):
-        for k in ["list_price", "rrp", "was_price", "before_price", "original_price", "strikethrough_price"]:
-            if k in buybox and not _contains_voucher_coupon_key(k):
-                candidates.append(buybox.get(k))
-        bp = buybox.get("price")
-        if isinstance(bp, dict):
-            for k in ["before_price", "was_price", "list_price", "rrp", "original", "old", "strikethrough", "strike"]:
-                if k in bp and not _contains_voucher_coupon_key(k):
-                    candidates.append(bp.get(k))
-
-    savings = product.get("savings")
-    if isinstance(savings, dict):
-        for k in ["price_before_discount", "before_price", "original_price", "was_price"]:
-            if k in savings and not _contains_voucher_coupon_key(k):
-                candidates.append(savings.get(k))
-
-    # pick first valid
-    for c in candidates:
-        f = _to_float(c)
-        if f is not None and f > 0:
-            return f
-
-    # deep scan
-    deep = _deep_find_price_candidates(product, want="list_price")
-    if deep:
-        deep.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        return deep[0][1]
-
-    return None
-
-
-def _deep_find_percent_candidates(obj):
-    """
-    Deep scan for discount percent candidates (exclude voucher/coupon).
-    Returns list of (score, percent_int)
-    """
-    out = []
-
-    def add(score, v):
-        if isinstance(v, (int, float)) and v >= 0:
-            out.append((score, int(round(v))))
-            return
-        if isinstance(v, str):
-            m = re.search(r"(\d{1,3})\s*%?", v)
-            if m:
-                out.append((score, int(m.group(1))))
-
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            key = str(k).lower()
-
-            # ignore voucher/coupon
-            if _contains_voucher_coupon_key(key):
-                continue
-
-            # strong percent keys
-            if any(t in key for t in ["discount_percentage", "savings_percentage", "deal_percentage", "percent_off", "percentage", "percent"]):
-                add(140, v)
-
-            # common deal/savings blocks (the percent might be inside)
-            if any(t in key for t in ["deal", "deals", "savings", "promotion", "promotions"]):
-                # just recurse; score will be applied inside
-                pass
-
-            out.extend(_deep_find_percent_candidates(v))
-
-    elif isinstance(obj, list):
-        for item in obj:
-            out.extend(_deep_find_percent_candidates(item))
-
-    return out
-
-
-def extract_discount_percent(product: dict, list_price: float | None, base_price: float | None):
-    """
-    Robust discount %:
-      1) deep scan for percent fields (non voucher)
-      2) else compute from list_price -> base_price
-    """
-    if not isinstance(product, dict):
-        return 0
-
-    cands = _deep_find_percent_candidates(product)
-    if cands:
-        cands.sort(key=lambda x: x[0], reverse=True)
-        p = cands[0][1]
-        if 0 <= p <= 99:
-            return p
-
-    if list_price and base_price:
-        return _pct(list_price, base_price)
-
-    return 0
-
-
-def _deep_find_voucher_price_candidates(obj):
-    """
-    Recursively scan payload for voucher/coupon PRICE signals.
-    Returns list of tuples: (score, price_float)
-    """
-    out = []
-
     def add(score, value):
         f = _to_float(value)
         if f is not None and f > 0:
-            out.append((score, f))
+            candidates.append((score, f))
 
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            key = str(k).lower()
+    def walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = str(k).lower()
 
-            # voucher/coupon branches are relevant here
-            if "voucher price" in key or ("voucher" in key and "price" in key) or ("coupon" in key and "price" in key):
-                add(200, v)
+                # explicit voucher/coupon price keys
+                if (("voucher" in key or "coupon" in key) and "price" in key) or ("voucher price" in key):
+                    add(200, v)
 
-            # sometimes voucher text is in strings under promotions/deals
-            if isinstance(v, str):
-                s = v.lower()
-                if "voucher price" in s:
-                    add(220, v)
+                # string evidence
+                if isinstance(v, str):
+                    s = v.lower()
+                    if "voucher price" in s:
+                        add(220, v)
 
-            out.extend(_deep_find_voucher_price_candidates(v))
+                walk(v)
 
-    elif isinstance(obj, list):
-        for item in obj:
-            out.extend(_deep_find_voucher_price_candidates(item))
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
 
-    elif isinstance(obj, str):
-        s = obj.lower()
-        if "voucher price" in s:
-            add(220, obj)
+        elif isinstance(obj, str):
+            s = obj.lower()
+            if "voucher price" in s:
+                add(220, obj)
 
-    return out
+    walk(product)
 
-
-def extract_voucher_price(product: dict, base_price: float | None):
-    """
-    Returns voucher price (e.g., 59.99) if exists.
-    Chooses best candidate <= base_price when possible.
-    """
-    if not isinstance(product, dict):
+    if not candidates:
         return None
 
-    cands = _deep_find_voucher_price_candidates(product)
-    if not cands:
-        return None
-
-    # prefer <= base_price if base_price known
+    # prefer <= base_price if known
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
     if base_price is not None and base_price > 0:
-        valid = [c for c in cands if c[1] <= base_price]
+        valid = [c for c in candidates if c[1] <= base_price]
         if valid:
             valid.sort(key=lambda x: (x[0], x[1]), reverse=True)
             return valid[0][1]
 
-    cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    return cands[0][1]
+    return candidates[0][1]
 
 
 # ----------------- Main -----------------
@@ -522,10 +335,6 @@ if st.button("Fetch Prices"):
                 "Brand": None,
                 "ASIN": asin,
                 "Size": None,
-                "% Discount": 0,
-                "Base price": None,
-                "Voucher price": None,
-                "% Voucher": 0,
                 "Final price": None,
                 "Date (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             }
@@ -552,22 +361,13 @@ if st.button("Fetch Prices"):
                     row["Brand"] = extract_brand(product)
                     row["Size"] = extract_size(product)
 
-                    base_price = extract_base_price(product)     # FIXED: base price excludes voucher/coupon
-                    list_price = extract_list_price(product)     # FIXED: deeper list price search
+                    base_price = extract_base_price(product)
                     voucher_price = extract_voucher_price(product, base_price)
 
-                    row["Base price"] = base_price
-                    row["Voucher price"] = voucher_price
-
-                    row["% Discount"] = extract_discount_percent(product, list_price, base_price)
-
-                    # Final price logic:
-                    # if voucher exists and is lower than base, final = voucher
-                    if base_price is not None and voucher_price is not None and voucher_price > 0 and voucher_price < base_price:
-                        row["% Voucher"] = _pct(base_price, voucher_price)
+                    # Final price rule: if voucher exists and is <= base price, final = voucher else base
+                    if base_price is not None and voucher_price is not None and voucher_price > 0 and voucher_price <= base_price:
                         row["Final price"] = voucher_price
                     else:
-                        row["% Voucher"] = 0
                         row["Final price"] = base_price
 
             except Exception:
@@ -579,11 +379,7 @@ if st.button("Fetch Prices"):
         time.sleep(0.25)
 
     df = pd.DataFrame(results, columns=[
-        "Brand", "ASIN", "Size",
-        "% Discount",
-        "Base price", "Voucher price", "% Voucher",
-        "Final price",
-        "Date (UTC)"
+        "Brand", "ASIN", "Size", "Final price", "Date (UTC)"
     ])
 
     st.subheader("Results")
