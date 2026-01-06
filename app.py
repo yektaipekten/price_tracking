@@ -258,7 +258,7 @@ def extract_base_price(product: dict):
 
 def extract_voucher_price(product: dict, base_price: float | None):
     """
-    Voucher price (e.g., 'Voucher price £59.99') deep scan.
+    Voucher price (e.g. 'Voucher price £59.99') deep scan.
     Returns a float or None.
     """
     if not isinstance(product, dict):
@@ -271,20 +271,45 @@ def extract_voucher_price(product: dict, base_price: float | None):
         if f is not None and f > 0:
             candidates.append((score, f))
 
+    # try to parse voucher price from any string
+    def parse_from_string(s: str):
+        if not s:
+            return
+        t = s.lower()
+
+        # strongest: explicit phrase
+        if "voucher price" in t:
+            add(250, s)
+            return
+
+        # other common patterns
+        if "voucher" in t or "coupon" in t:
+            # pick the first currency number after voucher/coupon texts
+            m = re.search(r"(£\s*\d+[.,]?\d*|\d+[.,]\d+|\d+)", s)
+            if m:
+                add(120, m.group(1))
+
     def walk(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
                 key = str(k).lower()
 
-                # explicit voucher/coupon price keys
-                if (("voucher" in key or "coupon" in key) and "price" in key) or ("voucher price" in key):
-                    add(200, v)
+                # 1) direct key matches that often hold the voucher-applied price
+                if key in [
+                    "voucher_price", "coupon_price",
+                    "price_after_coupon", "price_after_voucher",
+                    "checkout_price", "price_with_coupon", "price_with_voucher",
+                    "discounted_price", "final_price_after_coupon"
+                ]:
+                    add(220, v)
 
-                # string evidence
+                # 2) any key that contains voucher/coupon AND price
+                if (("voucher" in key or "coupon" in key) and "price" in key):
+                    add(210, v)
+
+                # 3) strings
                 if isinstance(v, str):
-                    s = v.lower()
-                    if "voucher price" in s:
-                        add(220, v)
+                    parse_from_string(v)
 
                 walk(v)
 
@@ -293,17 +318,16 @@ def extract_voucher_price(product: dict, base_price: float | None):
                 walk(item)
 
         elif isinstance(obj, str):
-            s = obj.lower()
-            if "voucher price" in s:
-                add(220, obj)
+            parse_from_string(obj)
 
     walk(product)
 
     if not candidates:
         return None
 
-    # prefer <= base_price if known
+    # prefer a voucher price that is <= base price (if base known)
     candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
     if base_price is not None and base_price > 0:
         valid = [c for c in candidates if c[1] <= base_price]
         if valid:
@@ -311,6 +335,7 @@ def extract_voucher_price(product: dict, base_price: float | None):
             return valid[0][1]
 
     return candidates[0][1]
+
 
 
 # ----------------- Main -----------------
