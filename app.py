@@ -11,7 +11,7 @@ st.set_page_config(page_title="Price Tracking", layout="wide")
 
 # ---- CONFIG ----
 API_KEY = st.secrets.get("RAINFOREST_API_KEY") or os.environ.get("RAINFOREST_API_KEY")
-MARKETPLACE = "amazon.uk"  # UK
+MARKETPLACE = "amazon_uk"  # UK
 
 # Optional simple password protection (same as your reference app)
 APP_PASSWORD = st.secrets.get("APP_PASSWORD")  # optional
